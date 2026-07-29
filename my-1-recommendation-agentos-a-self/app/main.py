@@ -477,13 +477,54 @@ def _do_run_orchestrated(task_id: UUID) -> None:
                     verification_passed = "failed" not in result.output.lower()
                     verification_output = result.output
 
-                    if not verification_passed and context.budget.max_retries > 0:
-                        context.budget.max_retries -= 1
-                        # Reload lessons so the new lesson is in context
-                        context.lessons = [l.recommended_action for l in store.list_lessons()]
+                    if not verification_passed:
+                        from app.models import VerificationResult, VerificationIssue
+                        from app.reflection import deterministic_lesson, build_failure_record
                         
-                        # Find the draft node this verify node depended on
                         draft_node_id = node.depends_on[0] if node.depends_on else None
+                        draft_answer = context.previous_results.get(draft_node_id, "unknown") if draft_node_id else "unknown"
+
+                        issues = []
+                        for line in result.output.split("\n"):
+                            if line.startswith("- "):
+                                parts = line[2:].split(":", 1)
+                                if len(parts) == 2:
+                                    severity = "medium"
+                                    # Try to extract severity if it exists in the output like [- [high] type: claim]
+                                    import re
+                                    sev_match = re.search(r"\[(.*?)\]", parts[0])
+                                    if sev_match:
+                                        severity = sev_match.group(1).lower()
+                                        parts[0] = parts[0].replace(f"[{sev_match.group(1)}]", "").strip()
+                                        
+                                    issues.append(VerificationIssue(
+                                        type=parts[0].strip() or "unknown_error", 
+                                        severity=severity if severity in ["low", "medium", "high"] else "medium", 
+                                        claim=parts[1].strip() or "Unknown claim",
+                                        evidence="Parsed from orchestrator", 
+                                        repair_instruction="Fix this issue."
+                                    ))
+                        if not issues:
+                            issues.append(VerificationIssue(type="unknown_error", severity="high", claim=result.output[:999], evidence="None", repair_instruction="None"))
+                        
+                        v_result = VerificationResult(
+                            task_id=task_id,
+                            answer=draft_answer,
+                            passed=False,
+                            issues=issues,
+                            verifier="orchestrator"
+                        )
+                        lesson = deterministic_lesson(str(task_id), v_result)
+                        store.add_lesson(lesson)
+                        failure = build_failure_record(str(task_id), v_result, lesson, failing_node=node.id, model=settings.ollama_model)
+                        store.add_failure(failure)
+                        _auto_store_procedural(task, lesson)
+                        
+                        if context.budget.max_retries > 0:
+                            context.budget.max_retries -= 1
+                            # Reload lessons so the new lesson is in context
+                            context.lessons = [l.recommended_action for l in store.list_lessons()]
+                        
                         draft_node = next((n for n in plan.nodes if n.id == draft_node_id), None) if draft_node_id else None
                         
                         if draft_node:
@@ -510,6 +551,8 @@ def _do_run_orchestrated(task_id: UUID) -> None:
                                 depends_on=[new_draft_id],
                                 status=NodeStatus.PENDING
                             ))
+                            # Increment max_nodes to prevent validation errors when appending to graph
+                            plan.budget.max_nodes = max(plan.budget.max_nodes, len(plan.nodes))
                             # Note: plan will be updated in DB at the end of the while loop, or we can just update it here:
                             store.update_plan(plan)
 

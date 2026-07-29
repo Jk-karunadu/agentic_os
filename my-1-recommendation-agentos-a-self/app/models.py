@@ -66,7 +66,7 @@ class NodeStatus(StrEnum):
 
 
 class ExecutionBudget(BaseModel):
-    max_nodes: int = Field(default=6, ge=1, le=12)
+    max_nodes: int = Field(default=12, ge=1, le=20)
     max_tool_calls: int = Field(default=12, ge=0, le=30)
     max_retries: int = Field(default=1, ge=0, le=2)
     max_output_tokens: int = Field(default=900, ge=100, le=2_000)
@@ -83,7 +83,7 @@ class PlanNode(BaseModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,30}$")
     type: NodeType
     objective: str = Field(min_length=5, max_length=600)
-    depends_on: list[str] = Field(default_factory=list, max_length=8)
+    depends_on: list[str] = Field(default_factory=list, max_length=24)
     status: NodeStatus = NodeStatus.PENDING
     events: list[NodeEvent] = Field(default_factory=list)
 
@@ -94,7 +94,7 @@ class TaskPlan(BaseModel):
     version: int = Field(default=1, ge=1)
     goal: str = Field(min_length=10, max_length=2_000)
     budget: ExecutionBudget = Field(default_factory=ExecutionBudget)
-    nodes: list[PlanNode] = Field(min_length=1, max_length=12)
+    nodes: list[PlanNode] = Field(min_length=1, max_length=24)
 
     @model_validator(mode="after")
     def validate_graph(self) -> "TaskPlan":
