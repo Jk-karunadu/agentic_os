@@ -1,0 +1,51 @@
+[
+  {
+    "id": "dev_001",
+    "split": "development",
+    "task": "Compare episodic memory and semantic memory for LLM agents using primary research sources.",
+    "required_sections": ["definitions", "comparison", "limitations", "sources"],
+    "criteria": ["uses at least three primary sources", "attaches evidence to factual claims", "states uncertainty where evidence is incomplete"]
+  },
+  {
+    "id": "dev_002",
+    "split": "development",
+    "task": "Explain how reflection differs from model fine-tuning in agent improvement.",
+    "required_sections": ["mechanism", "comparison", "limitations", "sources"],
+    "criteria": ["does not claim weight updates", "distinguishes feedback from verified evidence", "uses primary sources"]
+  },
+  {
+    "id": "dev_003",
+    "split": "development",
+    "task": "Produce a short evidence-backed brief on agent planning failure modes.",
+    "required_sections": ["failure modes", "mitigations", "sources"],
+    "criteria": ["separates facts from recommendations", "cites primary sources"]
+  },
+  {
+    "id": "holdout_001",
+    "split": "held_out",
+    "task": "Compare vector retrieval and graph memory for temporal knowledge updates in agents.",
+    "required_sections": ["comparison", "temporal-updates", "tradeoffs", "sources"],
+    "criteria": ["uses source-linked claims", "addresses uncertainty", "does not invent performance figures"]
+  },
+  {
+    "id": "holdout_002",
+    "split": "held_out",
+    "task": "Summarize evidence for verification agents reducing unsupported claims in research synthesis.",
+    "required_sections": ["evidence", "limitations", "sources"],
+    "criteria": ["verifiable claims only", "includes limitations"]
+  },
+  {
+    "id": "repeat_001a",
+    "split": "repeated_sequence",
+    "task": "Create a cited introduction to long-term memory benchmarks for agents.",
+    "required_sections": ["scope", "benchmarks", "sources"],
+    "criteria": ["uses primary papers", "records benchmark capabilities"]
+  },
+  {
+    "id": "repeat_001b",
+    "split": "repeated_sequence",
+    "task": "Update the earlier long-term-memory benchmark brief with temporal reasoning and abstention requirements.",
+    "required_sections": ["update", "temporal-reasoning", "abstention", "sources"],
+    "criteria": ["retrieves relevant earlier work", "does not repeat obsolete claims", "uses current evidence"]
+  }
+]

@@ -1,0 +1,61 @@
+/* Custom Streamlit Styling for AgentOS */
+
+/* Hide default streamlit header and footer */
+header {visibility: hidden;}
+footer {visibility: hidden;}
+
+/* Main app background padding reduction */
+.block-container {
+    padding-top: 2rem !important;
+    padding-bottom: 2rem !important;
+    max-width: 1200px;
+}
+
+/* Glassmorphism for containers and metric cards */
+.css-1r6slb0, .css-1y4p8pa, div[data-testid="metric-container"] {
+    background: rgba(30, 41, 59, 0.7) !important;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 1.5rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+/* Stylish tabs */
+div[data-baseweb="tab-list"] {
+    gap: 8px;
+}
+div[data-baseweb="tab"] {
+    background-color: transparent !important;
+    border-radius: 8px;
+    padding: 10px 16px;
+    border: 1px solid transparent;
+}
+div[data-baseweb="tab"]:hover {
+    background-color: rgba(0, 255, 157, 0.1) !important;
+}
+div[aria-selected="true"] {
+    background-color: rgba(0, 255, 157, 0.15) !important;
+    border: 1px solid rgba(0, 255, 157, 0.5) !important;
+}
+
+/* Custom buttons */
+button[kind="primary"] {
+    background: linear-gradient(90deg, #00FF9D 0%, #00B8FF 100%);
+    color: #0F172A !important;
+    font-weight: 600;
+    border: none;
+    border-radius: 8px;
+    transition: all 0.3s ease;
+}
+button[kind="primary"]:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(0, 255, 157, 0.4);
+}
+
+/* Status expanders (DAG execution trace) */
+.streamlit-expanderHeader {
+    font-weight: 600;
+    color: #E2E8F0;
+}

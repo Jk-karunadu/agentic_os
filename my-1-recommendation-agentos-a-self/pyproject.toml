@@ -1,0 +1,23 @@
+[project]
+name = "agentos-local"
+version = "0.1.0"
+description = "Local-first, evidence-backed agent runtime for research synthesis."
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.140,<0.141",
+  "httpx>=0.28,<0.29",
+  "pydantic-settings>=2.14,<3",
+  "uvicorn[standard]>=0.51,<0.52",
+  "streamlit>=1.45,<2",
+  "requests>=2.32,<3",
+  "duckduckgo-search>=6.2,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9.1,<10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
