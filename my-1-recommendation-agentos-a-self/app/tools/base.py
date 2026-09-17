@@ -62,3 +62,43 @@ class ToolRegistry:
             return tool.execute(**kwargs)
         except Exception as e:
             return f"Error executing '{name}': {e}"
+
+    def load_generated_tools(self, tools_data: list[dict]) -> int:
+        """Load persisted generated tools from DB on startup. Returns count loaded."""
+        import inspect
+        from app.tools.base import BaseTool as _BaseTool
+        loaded = 0
+        for tool_data in tools_data:
+            try:
+                import os, pathlib, re, json as json_mod, httpx, csv, zipfile
+                import imaplib, smtplib, email, urllib, ssl, sqlite3
+                ns = {
+                    "BaseTool": _BaseTool, "os": os, "Path": pathlib.Path,
+                    "pathlib": pathlib, "re": re, "json": json_mod,
+                    "httpx": httpx, "csv": csv, "zipfile": zipfile,
+                    "imaplib": imaplib, "smtplib": smtplib, "email": email,
+                    "urllib": urllib, "ssl": ssl, "sqlite3": sqlite3,
+                    "__name__": "__generated__",
+                }
+                exec(compile(tool_data["code"], f"<generated:{tool_data['name']}>", "exec"), ns)
+                for obj in ns.values():
+                    if inspect.isclass(obj) and issubclass(obj, _BaseTool) and obj is not _BaseTool:
+                        inst = obj()
+                        t_name = getattr(inst, "name", None) or tool_data["name"]
+                        inst.name = t_name
+                        self._tools[t_name] = inst
+                        loaded += 1
+                        break
+            except Exception:
+                pass
+        return loaded
+
+    def list_all(self) -> list[dict]:
+        """Returns all registered tools with name and description."""
+        return [{"name": t.name, "description": t.description} for t in self._tools.values()]
+
+    def remove(self, name: str) -> bool:
+        if name in self._tools:
+            del self._tools[name]
+            return True
+        return False

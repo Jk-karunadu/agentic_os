@@ -7,6 +7,7 @@ from app.config import settings
 from app.local_llm import LocalLLMUnavailable, OllamaClient
 from app.memory import MemoryStore
 from app.models import (
+    ChatRequest, ChatResponse,
     EntityRelation, ExecutionBudget, FailureRecord, MemoryItem,
     MemoryQuery, MemoryScoreBreakdown, MemoryType, NodeCompletion,
     NodeStatus, NodeType, OrchestratedRunResult, PlanNode, NodeEvent, ReflectionLesson,
@@ -29,15 +30,29 @@ from app.tools.base import ToolRegistry
 from app.tools.memory import MemoryQueryTool
 from app.tools.search import WebSearchTool
 from app.tools.url_reader import URLReaderTool
+from app.tools.url_scraper import URLScraperTool
 from app.tools.python_executor import PythonExecutorTool
 from app.tools.file_reader import FileReaderTool
+from app.tools.file_search import FileSearchTool
+from app.tools.tool_generator import ToolGeneratorTool
 
 tool_registry = ToolRegistry()
 tool_registry.register(MemoryQueryTool(memory_store))
 tool_registry.register(WebSearchTool())
 tool_registry.register(URLReaderTool())
+tool_registry.register(URLScraperTool())
 tool_registry.register(PythonExecutorTool())
 tool_registry.register(FileReaderTool())
+tool_registry.register(FileSearchTool())
+tool_registry.register(ToolGeneratorTool(llm, tool_registry, store))
+
+# Load persisted generated tools from previous sessions
+_saved_tools = store.load_generated_tools()
+if _saved_tools:
+    tool_registry.load_generated_tools(_saved_tools)
+
+from app.agent import ConversationalAgent
+agent = ConversationalAgent(settings, llm, tool_registry)
 
 dispatcher = WorkerDispatcher(llm, tool_registry)
 
@@ -602,3 +617,110 @@ def run_orchestrated_status(task_id: UUID) -> dict | OrchestratedRunResult:
         raise HTTPException(status_code=500, detail=str(result))
         
     return result
+
+
+# ── Chat (Self-Evolving Agent) ────────────────────────────────────────
+
+import uuid as _uuid
+
+@app.post("/chat", response_model=ChatResponse)
+def chat(request: ChatRequest) -> ChatResponse:
+    """Main chat endpoint for the self-evolving conversational agent."""
+    if not llm.healthcheck():
+        raise HTTPException(status_code=503, detail="Ollama is not running at the configured local address.")
+
+    session_id = request.session_id or str(_uuid.uuid4())
+
+    # Load conversation history
+    history_records = store.get_history(session_id, limit=settings.chat_history_limit)
+    history_for_llm = [{"role": r["role"], "content": r["content"]} for r in history_records]
+
+    # Save user message
+    store.add_message(session_id, "user", request.prompt)
+
+    # Run agent
+    response = agent.run(request.prompt, history_for_llm)
+
+    # Save assistant response
+    store.add_message(
+        session_id, "assistant", response.content,
+        tools_used=response.tools_used,
+        new_tools=response.new_tools_created,
+    )
+
+    return ChatResponse(
+        content=response.content,
+        session_id=session_id,
+        tools_used=response.tools_used,
+        new_tools_created=response.new_tools_created,
+        duration_ms=response.duration_ms,
+        timed_out=response.timed_out,
+        prompt_tokens=response.prompt_tokens,
+        output_tokens=response.output_tokens,
+    )
+
+
+from fastapi.responses import StreamingResponse
+import json as _json
+
+@app.post("/chat/stream")
+def chat_stream(request: ChatRequest):
+    """Streaming chat endpoint yielding live thoughts, tool calls, and final answer via SSE."""
+    if not llm.healthcheck():
+        raise HTTPException(status_code=503, detail="Ollama is not running at the configured local address.")
+
+    session_id = request.session_id or str(_uuid.uuid4())
+    history_records = store.get_history(session_id, limit=settings.chat_history_limit)
+    history_for_llm = [{"role": r["role"], "content": r["content"]} for r in history_records]
+
+    store.add_message(session_id, "user", request.prompt)
+
+    def event_generator():
+        final_content = ""
+        tools_used = []
+        new_tools = []
+        for event in agent.run_stream(request.prompt, history_for_llm):
+            if event["type"] == "final":
+                final_content = event.get("content", "")
+                tools_used = event.get("tools_used", [])
+                new_tools = event.get("new_tools", [])
+                event["session_id"] = session_id
+
+            yield f"data: {_json.dumps(event)}\n\n"
+
+        if final_content:
+            store.add_message(
+                session_id, "assistant", final_content,
+                tools_used=tools_used,
+                new_tools=new_tools,
+            )
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.get("/chat/{session_id}/history")
+def get_chat_history(session_id: str) -> list[dict]:
+    """Returns the conversation history for a session."""
+    return store.get_history(session_id, limit=100)
+
+
+@app.get("/chat/sessions")
+def get_sessions() -> list[str]:
+    """Returns all chat session IDs."""
+    return store.list_sessions()
+
+
+@app.get("/tools")
+def list_tools() -> list[dict]:
+    """Returns all currently registered tools."""
+    return tool_registry.list_all()
+
+
+@app.delete("/tools/generated/{tool_name}")
+def delete_generated_tool(tool_name: str) -> dict:
+    """Removes a generated tool from the registry and database."""
+    db_ok = store.delete_generated_tool(tool_name)
+    reg_ok = tool_registry.remove(tool_name)
+    if not db_ok and not reg_ok:
+        raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found.")
+    return {"deleted": tool_name, "from_db": db_ok, "from_registry": reg_ok}

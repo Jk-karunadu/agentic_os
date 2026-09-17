@@ -29,6 +29,6 @@ store is introduced only in Phase 4, after a retrieval baseline exists.
 Candidate recipes require evaluation and human approval before use.
 
 ## C6: No unverified memory as fact
-
+            
 Memories include type, source, timestamp, confidence, and validity period.
 Reflections are procedural advice, not evidence for research claims.

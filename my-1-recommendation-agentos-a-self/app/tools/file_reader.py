@@ -58,38 +58,50 @@ class FileReaderTool(BaseTool):
 
     @staticmethod
     def _read_pdf(path: str) -> str:
-        """Extract text from a PDF file."""
+        """Extract text from a PDF file using pypdf or PyMuPDF."""
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(path)
+            pages = [page.extract_text() or "" for page in reader.pages]
+            return "\n\n".join(p for p in pages if p.strip())
+        except ImportError:
+            pass
+
         try:
             import fitz  # PyMuPDF
             doc = fitz.open(path)
-            pages = []
-            for page in doc:
-                pages.append(page.get_text())
+            pages = [page.get_text() for page in doc]
             doc.close()
             return "\n\n".join(pages)
         except ImportError:
-            # Fallback: try pdfplumber
-            try:
-                import pdfplumber
-                text_parts = []
-                with pdfplumber.open(path) as pdf:
-                    for page in pdf.pages:
-                        page_text = page.extract_text()
-                        if page_text:
-                            text_parts.append(page_text)
-                return "\n\n".join(text_parts)
-            except ImportError:
-                return (
-                    "Error: No PDF library available. "
-                    "Install PyMuPDF (pip install pymupdf) or pdfplumber (pip install pdfplumber)."
-                )
+            pass
+
+        try:
+            import pdfplumber
+            text_parts = []
+            with pdfplumber.open(path) as pdf:
+                for page in pdf.pages:
+                    pt = page.extract_text()
+                    if pt:
+                        text_parts.append(pt)
+            return "\n\n".join(text_parts)
+        except ImportError:
+            return "Error: Could not extract text from PDF. Please ensure pypdf is installed."
 
     @staticmethod
     def _read_docx(path: str) -> str:
-        """Extract text from a DOCX file."""
+        """Extract text from a DOCX file using pure stdlib zipfile + xml."""
         try:
-            from docx import Document
-            doc = Document(path)
-            return "\n".join(para.text for para in doc.paragraphs if para.text.strip())
-        except ImportError:
-            return "Error: python-docx not installed. Install with: pip install python-docx"
+            import zipfile
+            import xml.etree.ElementTree as ET
+            with zipfile.ZipFile(path) as z:
+                with z.open("word/document.xml") as f:
+                    tree = ET.parse(f)
+                    return " ".join(n.text for n in tree.iter() if n.text)
+        except Exception:
+            try:
+                from docx import Document
+                doc = Document(path)
+                return "\n".join(para.text for para in doc.paragraphs if para.text.strip())
+            except Exception as e:
+                return f"Error reading docx: {e}"

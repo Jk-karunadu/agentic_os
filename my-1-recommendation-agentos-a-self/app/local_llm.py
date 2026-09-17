@@ -28,7 +28,8 @@ class OllamaClient:
         messages: list[dict] | None = None,
         tools: list[dict] | None = None,
         temperature: float = 0.2, 
-        json_format: bool = False
+        json_format: bool = False,
+        max_output_tokens: int | None = None,
     ) -> tuple[dict, dict]:
         """Generic chat completion for specialized workers, supporting tool calls."""
         if not self.healthcheck():
@@ -44,12 +45,11 @@ class OllamaClient:
         payload = {
             "model": self.settings.ollama_model,
             "stream": False,
-            "think": False,
             "messages": messages,
             "options": {
                 "temperature": temperature,
                 "num_ctx": self.settings.context_window,
-                "num_predict": self.settings.max_output_tokens,
+                "num_predict": max_output_tokens or self.settings.max_output_tokens,
             },
         }
         if tools:
@@ -103,8 +103,7 @@ class OllamaClient:
                 json={
                     "model": self.settings.ollama_model,
                     "stream": False,
-                    "think": False,
-                    "keep_alive": "10m",
+                                        "keep_alive": "10m",
                     "messages": [{"role": "user", "content": prompt}],
                     "options": {
                         "temperature": 0.2,
@@ -163,8 +162,7 @@ class OllamaClient:
             response = httpx.post(
                 f"{self.settings.ollama_base_url}/api/chat",
                 json={
-                    "model": self.settings.ollama_model, "stream": False, "think": False,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "model": self.settings.ollama_model, "stream": False,                     "messages": [{"role": "user", "content": prompt}],
                     "format": "json",
                     "options": {
                         "temperature": 0.1,
@@ -200,7 +198,7 @@ class OllamaClient:
             response = httpx.post(
                 f"{self.settings.ollama_base_url}/api/chat",
                 json={
-                    "model": self.settings.ollama_model, "stream": False, "think": False, "format": "json",
+                    "model": self.settings.ollama_model, "stream": False, "format": "json",
                     "messages": [{"role": "user", "content": prompt}],
                     "options": {"temperature": 0, "num_ctx": self.settings.context_window, "num_predict": 2000},
                 }, timeout=self.settings.request_timeout_seconds,
@@ -240,7 +238,7 @@ class OllamaClient:
                 f"{self.settings.ollama_base_url}/api/chat",
                 json={
                     "model": self.settings.ollama_model,
-                    "stream": False, "think": False, "keep_alive": "10m",
+                    "stream": False, "keep_alive": "10m",
                     "messages": [{"role": "user", "content": prompt}],
                     "options": {
                         "temperature": 0.15,
@@ -268,3 +266,4 @@ class OllamaClient:
                 output_tokens=body.get("eval_count"),
             ),
         )
+

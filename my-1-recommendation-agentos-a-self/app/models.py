@@ -298,3 +298,29 @@ class OrchestratedRunResult(BaseModel):
     node_results: dict[str, WorkerResult] = Field(default_factory=dict)
     total_tokens: int = 0
     total_duration_ms: int = 0
+
+
+# ── Chat models ──────────────────────────────────────────────────────
+
+class ChatMessageModel(BaseModel):
+    role: str
+    content: str
+    tools_used: list[str] = []
+    new_tools: list[str] = []
+    created_at: str = ""
+
+
+class ChatRequest(BaseModel):
+    prompt: str
+    session_id: str = ""
+
+
+class ChatResponse(BaseModel):
+    content: str
+    session_id: str
+    tools_used: list[str] = []
+    new_tools_created: list[str] = []
+    duration_ms: int = 0
+    timed_out: bool = False
+    prompt_tokens: int = 0
+    output_tokens: int = 0

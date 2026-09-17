@@ -129,8 +129,7 @@ def llm_reflect(task_id: str, result: VerificationResult) -> ReflectionLesson:
         response = httpx.post(
             f"{settings.ollama_base_url}/api/chat",
             json={
-                "model": settings.ollama_model, "stream": False, "think": False,
-                "format": "json",
+                "model": settings.ollama_model, "stream": False,                 "format": "json",
                 "messages": [{"role": "user", "content": prompt}],
                 "options": {"temperature": 0, "num_ctx": settings.context_window, "num_predict": 400},
             },
@@ -154,3 +153,4 @@ def llm_reflect(task_id: str, result: VerificationResult) -> ReflectionLesson:
 
 def _severity_rank(severity: IssueSeverity) -> int:
     return {"low": 0, "medium": 1, "high": 2}.get(severity.value, 0)
+

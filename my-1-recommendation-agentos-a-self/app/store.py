@@ -96,6 +96,27 @@ class TaskStore:
                 )
                 """
             )
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    tools_used TEXT NOT NULL DEFAULT '[]',
+                    new_tools TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL
+                )
+            """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS generated_tools (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    description TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    usage_count INTEGER NOT NULL DEFAULT 0
+                )
+            """)
 
     def create(self, task: Task) -> Task:
         with self._connect() as connection:
@@ -287,3 +308,63 @@ class TaskStore:
             repair_succeeded=bool(row["repair_succeeded"]) if row["repair_succeeded"] is not None else None,
             model=row["model"],
         )
+
+    # ── Conversation history ──────────────────────────────────────────────
+
+    def add_message(self, session_id: str, role: str, content: str, tools_used: list = None, new_tools: list = None) -> None:
+        from datetime import UTC, datetime
+        import json
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO conversations (session_id, role, content, tools_used, new_tools, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, role, content, json.dumps(tools_used or []), json.dumps(new_tools or []), datetime.now(UTC).isoformat())
+            )
+
+    def get_history(self, session_id: str, limit: int = 20) -> list[dict]:
+        import json
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT role, content, tools_used, new_tools, created_at FROM conversations WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                (session_id, limit)
+            ).fetchall()
+        result = []
+        for row in reversed(rows):
+            result.append({
+                "role": row["role"],
+                "content": row["content"],
+                "tools_used": json.loads(row["tools_used"]),
+                "new_tools": json.loads(row["new_tools"]),
+                "created_at": row["created_at"]
+            })
+        return result
+
+    def list_sessions(self) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT session_id FROM conversations ORDER BY id DESC LIMIT 50"
+            ).fetchall()
+        return [row["session_id"] for row in rows]
+
+    # ── Generated tools ───────────────────────────────────────────────────
+
+    def save_generated_tool(self, name: str, description: str, code: str) -> None:
+        from datetime import UTC, datetime
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO generated_tools (name, description, code, created_at, usage_count) VALUES (?, ?, ?, ?, COALESCE((SELECT usage_count FROM generated_tools WHERE name=?), 0))",
+                (name, description, code, datetime.now(UTC).isoformat(), name)
+            )
+
+    def load_generated_tools(self) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT name, description, code, usage_count FROM generated_tools ORDER BY id").fetchall()
+        return [{"name": row["name"], "description": row["description"], "code": row["code"], "usage_count": row["usage_count"]} for row in rows]
+
+    def delete_generated_tool(self, name: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute("DELETE FROM generated_tools WHERE name = ?", (name,))
+        return cursor.rowcount > 0
+
+    def increment_tool_usage(self, name: str) -> None:
+        with self._connect() as connection:
+            connection.execute("UPDATE generated_tools SET usage_count = usage_count + 1 WHERE name = ?", (name,))
