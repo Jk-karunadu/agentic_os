@@ -247,6 +247,146 @@ class MemoryStore:
             for r in rows
         ]
 
+    # ── Self-improvement & procedural memory ────────────────────────
+
+    def retrieve_relevant_lessons(
+        self, query: str, top_k: int = 3, min_score: float = 0.20,
+    ) -> list[MemoryItem]:
+        """Retrieve top-k procedural lessons semantically relevant to the task query."""
+        mq = MemoryQuery(query=query, memory_type=MemoryType.PROCEDURAL, top_k=top_k)
+        candidates = self._load_candidates(mq)
+        if not candidates:
+            return []
+
+        query_vec = embed_single(query)
+        now = datetime.now(UTC)
+
+        scored: list[tuple[float, MemoryItem]] = []
+        for item, embedding_blob in candidates:
+            sim = self._compute_similarity(query, query_vec, item.text, embedding_blob)
+            rec = self._recency_score(item.last_accessed, now)
+
+            # Heuristic score balancing relevance, importance, and historical success
+            score = (
+                0.50 * sim
+                + 0.25 * item.importance
+                + 0.15 * item.success_score
+                + 0.10 * rec
+            )
+            if score >= min_score:
+                scored.append((score, item))
+
+        scored.sort(key=lambda t: t[0], reverse=True)
+        top = scored[:top_k]
+
+        with self._connect() as conn:
+            for _, item in top:
+                conn.execute(
+                    "UPDATE memory_items SET last_accessed = ? WHERE id = ?",
+                    (now.isoformat(), item.id),
+                )
+
+        return [item for _, item in top]
+
+    def store_procedural_lesson(
+        self,
+        task_id: str,
+        trigger: str,
+        lesson_text: str,
+        recommended_action: str,
+        confidence: float,
+        lesson_id: int | None = None,
+    ) -> MemoryItem:
+        """Store a procedural lesson, deduplicating if a highly similar lesson already exists."""
+        text = f"Trigger: {trigger} | Lesson: {lesson_text} | Action: {recommended_action}"
+        query_vec = embed_single(text)
+
+        # Check existing procedural items for high similarity (> 0.85) to avoid clutter
+        mq = MemoryQuery(query=text, memory_type=MemoryType.PROCEDURAL, top_k=5)
+        candidates = self._load_candidates(mq)
+        for item, blob in candidates:
+            sim = self._compute_similarity(text, query_vec, item.text, blob)
+            if sim >= 0.85:
+                # Merge / reinforce existing memory
+                item.importance = min(1.0, round(item.importance + 0.1, 2))
+                item.success_score = min(1.0, round(item.success_score + 0.1, 2))
+                item.text = text
+                item.last_accessed = datetime.now(UTC)
+                meta = json.loads(item.metadata_json or "{}")
+                if lesson_id:
+                    meta["lesson_id"] = lesson_id
+                item.metadata_json = json.dumps(meta)
+                return self.store_memory(item)
+
+        meta_json = json.dumps({"lesson_id": lesson_id, "trigger": trigger, "action": recommended_action})
+        item = MemoryItem(
+            type=MemoryType.PROCEDURAL,
+            text=text,
+            importance=round(confidence, 2),
+            source_task_id=str(task_id),
+            success_score=0.5,
+            metadata_json=meta_json,
+        )
+        return self.store_memory(item)
+
+    def reward_memory(self, memory_id: str, delta: float = 0.15) -> None:
+        """Increase memory success score after a task passes verification."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT success_score FROM memory_items WHERE id = ?", (memory_id,)).fetchone()
+            if row:
+                new_score = min(1.0, round(row["success_score"] + delta, 3))
+                conn.execute(
+                    "UPDATE memory_items SET success_score = ?, last_accessed = ? WHERE id = ?",
+                    (new_score, datetime.now(UTC).isoformat(), memory_id),
+                )
+
+    def penalize_memory(self, memory_id: str, delta: float = 0.25) -> None:
+        """Decrease memory success score if task failed despite applying it."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT success_score, importance FROM memory_items WHERE id = ?", (memory_id,)).fetchone()
+            if row:
+                new_score = max(0.0, round(row["success_score"] - delta, 3))
+                new_imp = max(0.1, round(row["importance"] - 0.1, 3))
+                conn.execute(
+                    "UPDATE memory_items SET success_score = ?, importance = ?, last_accessed = ? WHERE id = ?",
+                    (new_score, new_imp, datetime.now(UTC).isoformat(), memory_id),
+                )
+
+    def store_exemplar(
+        self, task_id: str, objective: str, plan_summary: str, final_answer: str, tokens_used: int = 0,
+    ) -> MemoryItem:
+        """Crystallize a successful task execution as an episodic exemplar for few-shot learning."""
+        text = f"OBJECTIVE:\n{objective}\n\nSUCCESSFUL PLAN:\n{plan_summary}\n\nVERIFIED SOLUTION:\n{final_answer[:1500]}"
+        item = MemoryItem(
+            type=MemoryType.EPISODIC,
+            text=text,
+            importance=0.85,
+            source_task_id=str(task_id),
+            success_score=1.0,
+            metadata_json=json.dumps({"tokens_used": tokens_used, "objective": objective}),
+        )
+        return self.store_memory(item)
+
+    def retrieve_exemplars(self, query: str, top_k: int = 1) -> list[MemoryItem]:
+        """Retrieve highest-scoring previous successful exemplars for a similar objective."""
+        mq = MemoryQuery(query=query, memory_type=MemoryType.EPISODIC, top_k=top_k)
+        candidates = self._load_candidates(mq)
+        if not candidates:
+            return []
+
+        query_vec = embed_single(query)
+        now = datetime.now(UTC)
+        scored: list[tuple[float, MemoryItem]] = []
+        for item, blob in candidates:
+            sim = self._compute_similarity(query, query_vec, item.text, blob)
+            rec = self._recency_score(item.last_accessed, now)
+            total = 0.60 * sim + 0.20 * item.success_score + 0.10 * item.importance + 0.10 * rec
+            if sim >= 0.40:
+                scored.append((total, item))
+
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return [item for _, item in scored[:top_k]]
+
     # ── Pruning ──────────────────────────────────────────────────────
 
     def prune_expired(self) -> int:
@@ -256,6 +396,15 @@ class MemoryStore:
             cursor = conn.execute(
                 "DELETE FROM memory_items WHERE valid_to IS NOT NULL AND valid_to < ?",
                 (now,),
+            )
+            return cursor.rowcount
+
+    def prune_ineffective(self, threshold: float = 0.20) -> int:
+        """Prune procedural memory items that have proven ineffective."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM memory_items WHERE type = 'procedural' AND success_score < ? AND importance < 0.3",
+                (threshold,),
             )
             return cursor.rowcount
 

@@ -173,12 +173,16 @@ class VerifyRequest(BaseModel):
 
 
 class ReflectionLesson(BaseModel):
+    id: int | None = None
     task_id: UUID
     trigger: str = Field(min_length=3, max_length=160)
     lesson: str = Field(min_length=10, max_length=1_000)
     recommended_action: str = Field(min_length=5, max_length=1_000)
     scope: str = Field(default="research_synthesis", max_length=100)
     confidence: float = Field(ge=0, le=1)
+    success_count: int = 0
+    failure_count: int = 0
+    effectiveness_score: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class ErrorType(StrEnum):
@@ -270,6 +274,15 @@ class EntityRelation(BaseModel):
     valid_to: datetime | None = None
 
 
+class EpisodicExemplar(BaseModel):
+    task_id: UUID
+    objective: str
+    plan_summary: str
+    final_answer: str
+    verification_passed: bool = True
+    tokens_used: int = 0
+
+
 # ── Phase 5: Multi-agent workers ────────────────────────────────────
 
 class WorkerContext(BaseModel):
@@ -278,6 +291,8 @@ class WorkerContext(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     previous_results: dict[str, str] = Field(default_factory=dict)
     lessons: list[str] = Field(default_factory=list)
+    applied_lesson_ids: list[int] = Field(default_factory=list)
+    exemplars: list[str] = Field(default_factory=list)
     budget: ExecutionBudget
 
 
@@ -292,12 +307,17 @@ class WorkerResult(BaseModel):
 
 class OrchestratedRunResult(BaseModel):
     task_id: UUID
+    plan: dict | None = None
     final_answer: str | None = None
     verification_passed: bool = False
     verification_output: str | None = None
     node_results: dict[str, WorkerResult] = Field(default_factory=dict)
     total_tokens: int = 0
     total_duration_ms: int = 0
+    applied_lessons: list[str] = Field(default_factory=list)
+    lessons_rewarded: list[int] = Field(default_factory=list)
+    lessons_penalized: list[int] = Field(default_factory=list)
+
 
 
 # ── Chat models ──────────────────────────────────────────────────────

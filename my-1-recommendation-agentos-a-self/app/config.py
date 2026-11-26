@@ -12,8 +12,10 @@ class Settings(BaseSettings):
     context_window: int = 8192
     soft_timeout_ratio: float = 0.80
     max_tool_generation_attempts: int = 2
-    max_agent_iterations: int = 12
+    max_agent_iterations: int = 20
     chat_history_limit: int = 20
+    max_rethink_attempts: int = 5
+    max_consecutive_tool_failures: int = 3
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="AGENTOS_")
 

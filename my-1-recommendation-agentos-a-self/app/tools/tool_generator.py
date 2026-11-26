@@ -88,6 +88,24 @@ class ToolGeneratorTool(BaseTool):
             f"It has been saved permanently and is {status}."
         )
 
+    def heal_tool(self, tool_name: str, runtime_error: str) -> bool:
+        """Autonomously repair a broken generated tool using its runtime traceback."""
+        tool_record = self.store.get_generated_tool(tool_name)
+        if not tool_record:
+            return False
+
+        old_code = tool_record["code"]
+        fixed_code = self._fix_code(old_code, runtime_error)
+        if not fixed_code:
+            return False
+
+        test = self._test_code(fixed_code, tool_name)
+        if not test["success"]:
+            return False
+
+        self.store.update_generated_tool_code(tool_name, fixed_code)
+        return self._register_in_registry(fixed_code, tool_name)
+
     # ── Code generation ───────────────────────────────────────────────
 
     def _generate_code(self, tool_name: str, description: str, capability: str) -> str:

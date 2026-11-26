@@ -41,6 +41,10 @@ class WriterWorker(BaseWorker):
         if lessons_text:
             system_prompt += f"\nIMPORTANT — LESSONS FROM PRIOR FAILURES:\n{lessons_text}\n"
 
+        if context.exemplars:
+            exemplars_text = "\n\n".join(f"-- Exemplar --\n{ex}" for ex in context.exemplars)
+            system_prompt += f"\nHIGH-QUALITY DEMONSTRATION OF SUCCESSFUL SYNTHESIS:\n{exemplars_text}\n"
+
         prompt = (
             f"OBJECTIVE FOR THIS DRAFT: {node.objective}\n\n"
             f"OVERALL TASK: {context.objective}\n\n"

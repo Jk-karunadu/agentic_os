@@ -161,7 +161,9 @@ def test_orchestrated_run_endpoint() -> None:
     try:
         res = client.post(f"/tasks/{task_id}/run-orchestrated")
         assert res.status_code == 200
-        data = res.json()
+        status_res = client.get(f"/tasks/{task_id}/run-orchestrated/status")
+        assert status_res.status_code == 200
+        data = status_res.json()
         
         print("DEBUG DATA:", data)
         assert data["task_id"] == task_id

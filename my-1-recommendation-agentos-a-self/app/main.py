@@ -34,6 +34,8 @@ from app.tools.url_scraper import URLScraperTool
 from app.tools.python_executor import PythonExecutorTool
 from app.tools.file_reader import FileReaderTool
 from app.tools.file_search import FileSearchTool
+from app.tools.list_directory import ListDirectoryTool
+from app.tools.run_shell import RunShellTool
 from app.tools.tool_generator import ToolGeneratorTool
 
 tool_registry = ToolRegistry()
@@ -44,7 +46,11 @@ tool_registry.register(URLScraperTool())
 tool_registry.register(PythonExecutorTool())
 tool_registry.register(FileReaderTool())
 tool_registry.register(FileSearchTool())
-tool_registry.register(ToolGeneratorTool(llm, tool_registry, store))
+tool_registry.register(ListDirectoryTool())
+tool_registry.register(RunShellTool())
+tool_gen = ToolGeneratorTool(llm, tool_registry, store)
+tool_registry.register(tool_gen)
+tool_registry.set_healer(tool_gen)
 
 # Load persisted generated tools from previous sessions
 _saved_tools = store.load_generated_tools()
@@ -52,7 +58,7 @@ if _saved_tools:
     tool_registry.load_generated_tools(_saved_tools)
 
 from app.agent import ConversationalAgent
-agent = ConversationalAgent(settings, llm, tool_registry)
+agent = ConversationalAgent(settings, llm, tool_registry, memory_store=memory_store)
 
 dispatcher = WorkerDispatcher(llm, tool_registry)
 
@@ -208,6 +214,45 @@ def reflect_on_failure(task_id: UUID) -> ReflectionLesson:
     return store.add_lesson(deterministic_lesson(str(task_id), verification))
 
 
+@app.get("/lessons", response_model=list[ReflectionLesson])
+def list_all_lessons(task_id: UUID | None = None, min_effectiveness: float = 0.0) -> list[ReflectionLesson]:
+    return store.list_lessons(task_id=task_id, min_effectiveness=min_effectiveness)
+
+
+@app.get("/reflection/stats")
+def get_reflection_stats() -> dict:
+    all_lessons = store.list_lessons()
+    failures = store.list_failures()
+    tools = store.load_generated_tools()
+
+    avg_effectiveness = (
+        round(sum(l.effectiveness_score for l in all_lessons) / len(all_lessons), 2)
+        if all_lessons else 0.0
+    )
+
+    failure_types: dict[str, int] = {}
+    for f in failures:
+        t = f.error_type if isinstance(f.error_type, str) else f.error_type.value
+        failure_types[t] = failure_types.get(t, 0) + 1
+
+    return {
+        "total_lessons": len(all_lessons),
+        "avg_effectiveness": avg_effectiveness,
+        "total_failures": len(failures),
+        "failures_by_type": failure_types,
+        "generated_tools_count": len(tools),
+        "generated_tools": tools,
+        "lessons": [l.model_dump() for l in all_lessons],
+    }
+
+
+@app.post("/reflection/prune")
+def prune_reflections(threshold: float = 0.20) -> dict:
+    pruned_lessons = store.prune_ineffective_lessons(threshold)
+    pruned_memory = memory_store.prune_ineffective(threshold)
+    return {"pruned_lessons": pruned_lessons, "pruned_memory": pruned_memory}
+
+
 # ── Failure database ─────────────────────────────────────────────────
 
 @app.get("/failures", response_model=list[FailureRecord])
@@ -298,9 +343,8 @@ def run_verified(task_id: UUID) -> VerifiedRunResult:
     _auto_store_procedural(task, lesson)
 
     # ── Retry once with lessons ──────────────────────────────────
-    # Gather all prior lessons for this task.
-    all_lessons = store.list_lessons(task_id)
-    lesson_texts = [l.recommended_action for l in all_lessons]
+    rel_mems = memory_store.retrieve_relevant_lessons(task.objective, top_k=3)
+    lesson_texts = [m.text for m in rel_mems] if rel_mems else [l.recommended_action for l in store.list_lessons(task_id)]
     try:
         retry_result = llm.research_brief_with_lessons(
             str(task.id), task.objective, evidence_dicts, lesson_texts,
@@ -317,15 +361,28 @@ def run_verified(task_id: UUID) -> VerifiedRunResult:
     retry_verification = deterministic_verify(str(task_id), retry_result.answer, task.evidence)
     store.add_verification(retry_verification)
 
-    # Update failure record with repair outcome
+    # Update failure record and lesson effectiveness
     store.update_failure_repair(failure.id, retry_verification.passed)
+    if lesson.id:
+        if retry_verification.passed:
+            store.reward_lesson(lesson.id)
+        else:
+            store.penalize_lesson(lesson.id)
 
     final_status = TaskStatus.COMPLETED if retry_verification.passed else TaskStatus.FAILED
     store.set_status(task_id, final_status)
 
-    # Auto-store episodic memory from the final result.
+    # Auto-store episodic memory and exemplar from the final result.
     final_answer = retry_result.answer if retry_verification.passed else first_result.answer
     _auto_store_episodic(task, final_answer, passed=retry_verification.passed)
+    if retry_verification.passed:
+        memory_store.store_exemplar(
+            task_id=str(task_id),
+            objective=task.objective,
+            plan_summary="direct_retry_with_lessons",
+            final_answer=final_answer,
+            tokens_used=retry_result.trace.output_tokens or 0,
+        )
 
     return VerifiedRunResult(
         task_id=task_id, answer=first_result.answer,
@@ -388,14 +445,14 @@ def _auto_store_episodic(task: Task, answer: str, passed: bool) -> None:
 
 def _auto_store_procedural(task: Task, lesson: ReflectionLesson) -> None:
     """Store a procedural memory from a reflection lesson."""
-    text = f"Lesson from task '{task.objective[:150]}': {lesson.lesson} Action: {lesson.recommended_action}"
-    memory_store.store_memory(MemoryItem(
-        type=MemoryType.PROCEDURAL,
-        text=text,
-        importance=lesson.confidence,
-        source_task_id=str(task.id),
-        success_score=0.0,
-    ))
+    memory_store.store_procedural_lesson(
+        task_id=str(task.id),
+        trigger=lesson.trigger,
+        lesson_text=lesson.lesson,
+        recommended_action=lesson.recommended_action,
+        confidence=lesson.confidence,
+        lesson_id=lesson.id,
+    )
 
 
 # ── Phase 5 Orchestrated run ─────────────────────────────────────────
@@ -421,12 +478,37 @@ def _do_run_orchestrated(task_id: UUID) -> None:
 
         store.set_status(task_id, TaskStatus.RUNNING)
 
+        # Retrieve semantically relevant procedural lessons and exemplars
+        relevant_mem_lessons = memory_store.retrieve_relevant_lessons(task.objective, top_k=3)
+        applied_lessons_texts: list[str] = []
+        applied_lesson_ids: list[int] = []
+        import json as _json
+        for mem in relevant_mem_lessons:
+            applied_lessons_texts.append(mem.text)
+            try:
+                meta = _json.loads(mem.metadata_json or "{}")
+                if meta.get("lesson_id"):
+                    applied_lesson_ids.append(int(meta["lesson_id"]))
+            except Exception:
+                pass
+
+        if not applied_lessons_texts:
+            fallback_lessons = store.list_lessons(min_effectiveness=0.3)[:3]
+            for l in fallback_lessons:
+                applied_lessons_texts.append(f"{l.trigger}: {l.recommended_action}")
+                if l.id:
+                    applied_lesson_ids.append(l.id)
+
+        exemplars = [ex.text for ex in memory_store.retrieve_exemplars(task.objective, top_k=1)]
+
         context = WorkerContext(
             task_id=task_id,
             objective=task.objective,
             evidence=task.evidence,
             previous_results={},
-            lessons=[l.recommended_action for l in store.list_lessons()],
+            lessons=applied_lessons_texts,
+            applied_lesson_ids=applied_lesson_ids,
+            exemplars=exemplars,
             budget=plan.budget,
         )
 
@@ -474,6 +556,7 @@ def _do_run_orchestrated(task_id: UUID) -> None:
                     store.set_status(task_id, TaskStatus.FAILED)
                     _ORCHESTRATION_RESULTS[task_id] = OrchestratedRunResult(
                         task_id=task_id,
+                        plan=plan.model_dump(),
                         final_answer=final_answer,
                         verification_passed=False,
                         verification_output=result.output if node.type == NodeType.VERIFY else verification_output,
@@ -535,41 +618,46 @@ def _do_run_orchestrated(task_id: UUID) -> None:
                         store.add_failure(failure)
                         _auto_store_procedural(task, lesson)
                         
-                        if context.budget.max_retries > 0:
+                        can_retry = context.budget.max_retries > 0
+                        if can_retry:
                             context.budget.max_retries -= 1
-                            # Reload lessons so the new lesson is in context
-                            context.lessons = [l.recommended_action for l in store.list_lessons()]
+                            # Reload lessons semantically so the newly learned lesson is in context
+                            revised_mems = memory_store.retrieve_relevant_lessons(task.objective, top_k=3)
+                            context.lessons = [m.text for m in revised_mems] if revised_mems else [lesson.recommended_action]
+                            if lesson.id and lesson.id not in context.applied_lesson_ids:
+                                context.applied_lesson_ids.append(lesson.id)
                         
-                        draft_node = next((n for n in plan.nodes if n.id == draft_node_id), None) if draft_node_id else None
-                        
-                        if draft_node:
-                            retry_idx = context.budget.max_retries
-                            new_draft_id = f"retry_draft_{retry_idx}"
-                            new_verify_id = f"retry_verify_{retry_idx}"
-                            
-                            log_event("system", f"Verification failed. Initiating self-improvement retry loop ({new_draft_id})...")
-                            
-                            # Add the original draft and the failed verify node to dependencies so the LLM can see what it wrote and what failed
-                            retry_deps = draft_node.depends_on.copy() + [draft_node.id, node.id]
-                            
-                            plan.nodes.append(PlanNode(
-                                id=new_draft_id,
-                                type=NodeType.DRAFT,
-                                objective="Rewrite the 'draft' output to fix the verification issues from 'verify'. Do NOT repeat the errors.",
-                                depends_on=retry_deps,
-                                status=NodeStatus.PENDING
-                            ))
-                            plan.nodes.append(PlanNode(
-                                id=new_verify_id,
-                                type=NodeType.VERIFY,
-                                objective="Verify revised draft",
-                                depends_on=[new_draft_id],
-                                status=NodeStatus.PENDING
-                            ))
-                            # Increment max_nodes to prevent validation errors when appending to graph
-                            plan.budget.max_nodes = max(plan.budget.max_nodes, len(plan.nodes))
-                            # Note: plan will be updated in DB at the end of the while loop, or we can just update it here:
-                            store.update_plan(plan)
+                            draft_node = next((n for n in plan.nodes if n.id == draft_node_id), None) if draft_node_id else None
+                            if draft_node:
+                                existing_retries = sum(1 for n in plan.nodes if n.id.startswith("retry_draft_"))
+                                new_retry_num = existing_retries + 1
+                                new_draft_id = f"retry_draft_{new_retry_num}"
+                                new_verify_id = f"retry_verify_{new_retry_num}"
+                                
+                                log_event("system", f"Verification failed. Initiating self-improvement retry loop ({new_draft_id})...")
+                                
+                                # Add the original draft and the failed verify node to dependencies so the LLM can see what it wrote and what failed
+                                retry_deps = draft_node.depends_on.copy() + [draft_node.id, node.id]
+                                
+                                plan.nodes.append(PlanNode(
+                                    id=new_draft_id,
+                                    type=NodeType.DRAFT,
+                                    objective="Rewrite the 'draft' output to fix the verification issues from 'verify'. Do NOT repeat the errors.",
+                                    depends_on=retry_deps,
+                                    status=NodeStatus.PENDING
+                                ))
+                                plan.nodes.append(PlanNode(
+                                    id=new_verify_id,
+                                    type=NodeType.VERIFY,
+                                    objective="Verify revised draft",
+                                    depends_on=[new_draft_id],
+                                    status=NodeStatus.PENDING
+                                ))
+                                # Increment max_nodes to prevent validation errors when appending to graph
+                                plan.budget.max_nodes = max(plan.budget.max_nodes, len(plan.nodes))
+                                store.update_plan(plan)
+                        else:
+                            log_event("system", "Verification failed and retry budget is exhausted. Concluding task.")
 
                 # Complete with success
                 plan = PlanScheduler.complete(plan, node.id, succeeded=True)
@@ -578,24 +666,58 @@ def _do_run_orchestrated(task_id: UUID) -> None:
     
         # Check if plan fully completed
         is_completed = all(n.status in (NodeStatus.COMPLETED, NodeStatus.SKIPPED) for n in plan.nodes)
-        if is_completed:
+        rewarded_ids: list[int] = []
+        penalized_ids: list[int] = []
+
+        if is_completed and verification_passed:
             store.set_status(task_id, TaskStatus.COMPLETED)
             if final_answer:
-                _auto_store_episodic(task, final_answer, passed=verification_passed)
+                _auto_store_episodic(task, final_answer, passed=True)
+                plan_summary = " -> ".join(n.id for n in plan.nodes)
+                memory_store.store_exemplar(
+                    task_id=str(task_id),
+                    objective=task.objective,
+                    plan_summary=plan_summary,
+                    final_answer=final_answer,
+                    tokens_used=total_tokens,
+                )
+            for lid in context.applied_lesson_ids:
+                if store.reward_lesson(lid):
+                    rewarded_ids.append(lid)
         else:
             store.set_status(task_id, TaskStatus.FAILED)
+            for lid in context.applied_lesson_ids:
+                if store.penalize_lesson(lid):
+                    penalized_ids.append(lid)
 
         _ORCHESTRATION_RESULTS[task_id] = OrchestratedRunResult(
             task_id=task_id,
+            plan=plan.model_dump(),
             final_answer=final_answer,
             verification_passed=verification_passed,
             verification_output=verification_output,
             node_results=node_results,
             total_tokens=total_tokens,
             total_duration_ms=total_duration,
+            applied_lessons=context.lessons,
+            lessons_rewarded=rewarded_ids,
+            lessons_penalized=penalized_ids,
         )
     except Exception as e:
-        _ORCHESTRATION_RESULTS[task_id] = e
+        import traceback
+        traceback.print_exc()
+        store.set_status(task_id, TaskStatus.FAILED)
+        plan_dict = plan.model_dump() if 'plan' in locals() and plan else None
+        _ORCHESTRATION_RESULTS[task_id] = OrchestratedRunResult(
+            task_id=task_id,
+            plan=plan_dict,
+            final_answer=final_answer if 'final_answer' in locals() and final_answer else f"Execution stopped due to error: {e}",
+            verification_passed=False,
+            verification_output=f"Error in orchestrator: {e}",
+            node_results=node_results if 'node_results' in locals() else {},
+            total_tokens=total_tokens if 'total_tokens' in locals() else 0,
+            total_duration_ms=total_duration if 'total_duration' in locals() else 0,
+        )
 
 @app.post("/tasks/{task_id}/run-orchestrated")
 def run_orchestrated(task_id: UUID, background_tasks: BackgroundTasks) -> dict:
@@ -608,13 +730,21 @@ def run_orchestrated(task_id: UUID, background_tasks: BackgroundTasks) -> dict:
 def run_orchestrated_status(task_id: UUID) -> dict | OrchestratedRunResult:
     if task_id not in _ORCHESTRATION_RESULTS:
         # If still running, return the latest plan state so UI can track progress
-        plan = store.latest_plan(task_id)
-        plan_dict = plan.model_dump() if plan else None
+        try:
+            plan = store.latest_plan(task_id)
+            plan_dict = plan.model_dump() if plan else None
+        except Exception:
+            plan_dict = None
         return {"status": "running", "plan": plan_dict}
     
     result = _ORCHESTRATION_RESULTS[task_id]
     if isinstance(result, Exception):
-        raise HTTPException(status_code=500, detail=str(result))
+        return {
+            "status": "error",
+            "error": str(result),
+            "verification_passed": False,
+            "final_answer": f"Backend error: {result}",
+        }
         
     return result
 

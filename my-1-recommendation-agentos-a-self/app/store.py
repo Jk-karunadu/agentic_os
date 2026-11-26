@@ -202,7 +202,26 @@ class TaskStore:
                 "SELECT plan_json FROM plans WHERE task_id = ? ORDER BY version DESC LIMIT 1",
                 (str(task_id),),
             ).fetchone()
-        return TaskPlan.model_validate_json(row["plan_json"]) if row else None
+        if not row:
+            return None
+        try:
+            return TaskPlan.model_validate_json(row["plan_json"])
+        except Exception:
+            try:
+                import json
+                data = json.loads(row["plan_json"])
+                seen_ids = set()
+                unique_nodes = []
+                for node in data.get("nodes", []):
+                    if node["id"] not in seen_ids:
+                        seen_ids.add(node["id"])
+                        unique_nodes.append(node)
+                data["nodes"] = unique_nodes
+                if "budget" in data and isinstance(data["budget"], dict):
+                    data["budget"]["max_nodes"] = max(data["budget"].get("max_nodes", 8), len(unique_nodes))
+                return TaskPlan.model_validate(data)
+            except Exception:
+                return None
 
     def update_plan(self, plan: TaskPlan) -> TaskPlan:
         with self._connect() as connection:
@@ -234,21 +253,78 @@ class TaskStore:
     def add_lesson(self, lesson: ReflectionLesson) -> ReflectionLesson:
         from datetime import UTC, datetime
         with self._connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 "INSERT INTO lessons (task_id, lesson_json, created_at) VALUES (?, ?, ?)",
                 (str(lesson.task_id), lesson.model_dump_json(), datetime.now(UTC).isoformat()),
             )
+            lesson.id = cursor.lastrowid
+            connection.execute(
+                "UPDATE lessons SET lesson_json = ? WHERE id = ?",
+                (lesson.model_dump_json(), lesson.id),
+            )
         return lesson
 
-    def list_lessons(self, task_id: UUID | None = None) -> list[ReflectionLesson]:
+    def get_lesson(self, lesson_id: int) -> ReflectionLesson | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT id, lesson_json FROM lessons WHERE id = ?", (lesson_id,)).fetchone()
+        if not row:
+            return None
+        lesson = ReflectionLesson.model_validate_json(row["lesson_json"])
+        lesson.id = row["id"]
+        return lesson
+
+    def update_lesson(self, lesson: ReflectionLesson) -> None:
+        if lesson.id is None:
+            return
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE lessons SET lesson_json = ? WHERE id = ?",
+                (lesson.model_dump_json(), lesson.id),
+            )
+
+    def reward_lesson(self, lesson_id: int, delta: float = 0.15) -> ReflectionLesson | None:
+        lesson = self.get_lesson(lesson_id)
+        if not lesson:
+            return None
+        lesson.success_count += 1
+        lesson.effectiveness_score = min(1.0, round(lesson.effectiveness_score + delta, 3))
+        self.update_lesson(lesson)
+        return lesson
+
+    def penalize_lesson(self, lesson_id: int, delta: float = 0.25) -> ReflectionLesson | None:
+        lesson = self.get_lesson(lesson_id)
+        if not lesson:
+            return None
+        lesson.failure_count += 1
+        lesson.effectiveness_score = max(0.0, round(lesson.effectiveness_score - delta, 3))
+        self.update_lesson(lesson)
+        return lesson
+
+    def prune_ineffective_lessons(self, threshold: float = 0.20) -> int:
+        lessons = self.list_lessons()
+        pruned = 0
+        with self._connect() as connection:
+            for lesson in lessons:
+                if (lesson.success_count + lesson.failure_count >= 2) and lesson.effectiveness_score < threshold:
+                    connection.execute("DELETE FROM lessons WHERE id = ?", (lesson.id,))
+                    pruned += 1
+        return pruned
+
+    def list_lessons(self, task_id: UUID | None = None, min_effectiveness: float = 0.0) -> list[ReflectionLesson]:
         with self._connect() as connection:
             if task_id:
                 rows = connection.execute(
-                    "SELECT lesson_json FROM lessons WHERE task_id = ? ORDER BY id", (str(task_id),)
+                    "SELECT id, lesson_json FROM lessons WHERE task_id = ? ORDER BY id", (str(task_id),)
                 ).fetchall()
             else:
-                rows = connection.execute("SELECT lesson_json FROM lessons ORDER BY id").fetchall()
-        return [ReflectionLesson.model_validate_json(row["lesson_json"]) for row in rows]
+                rows = connection.execute("SELECT id, lesson_json FROM lessons ORDER BY id").fetchall()
+        lessons = []
+        for row in rows:
+            l = ReflectionLesson.model_validate_json(row["lesson_json"])
+            l.id = row["id"]
+            if l.effectiveness_score >= min_effectiveness:
+                lessons.append(l)
+        return lessons
 
     # ── Failure database ─────────────────────────────────────────────
 
@@ -368,3 +444,17 @@ class TaskStore:
     def increment_tool_usage(self, name: str) -> None:
         with self._connect() as connection:
             connection.execute("UPDATE generated_tools SET usage_count = usage_count + 1 WHERE name = ?", (name,))
+
+    def get_generated_tool(self, name: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT name, description, code, usage_count FROM generated_tools WHERE name = ?", (name,)).fetchone()
+        return {"name": row["name"], "description": row["description"], "code": row["code"], "usage_count": row["usage_count"]} if row else None
+
+    def update_generated_tool_code(self, name: str, code: str) -> bool:
+        from datetime import UTC, datetime
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE generated_tools SET code = ?, created_at = ? WHERE name = ?",
+                (code, datetime.now(UTC).isoformat(), name)
+            )
+        return cursor.rowcount > 0

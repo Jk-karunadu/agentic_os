@@ -37,6 +37,11 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool] = {}
+        self._healer = None
+        self._healing: set[str] = set()
+
+    def set_healer(self, healer) -> None:
+        self._healer = healer
 
     def register(self, tool: BaseTool) -> None:
         self._tools[tool.name] = tool
@@ -45,7 +50,7 @@ class ToolRegistry:
         return [tool.get_schema() for tool in self._tools.values()]
 
     def execute_tool(self, name: str, arguments: str | dict[str, Any]) -> str:
-        """Executes a tool by name with the given arguments."""
+        """Executes a tool by name with the given arguments, with automatic self-healing on failure."""
         tool = self._tools.get(name)
         if not tool:
             return f"Error: Tool '{name}' not found."
@@ -61,6 +66,20 @@ class ToolRegistry:
         try:
             return tool.execute(**kwargs)
         except Exception as e:
+            # Attempt autonomous self-healing if a healer is configured
+            if self._healer and hasattr(self._healer, "heal_tool") and name not in self._healing:
+                self._healing.add(name)
+                try:
+                    healed = self._healer.heal_tool(name, str(e))
+                    if healed:
+                        new_tool = self._tools.get(name)
+                        if new_tool:
+                            return f"[Self-Healed Tool '{name}']: " + str(new_tool.execute(**kwargs))
+                except Exception:
+                    pass
+                finally:
+                    self._healing.discard(name)
+
             return f"Error executing '{name}': {e}"
 
     def load_generated_tools(self, tools_data: list[dict]) -> int:
